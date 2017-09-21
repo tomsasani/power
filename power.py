@@ -88,6 +88,11 @@ def dp_into_array(covfile, region="1:1-100"):
     return dp_array
 
 def variant_into_array(vcffile, region, trio, cutoff=10):
+    """
+    Iterate over a VCF, and catalog each putative DNM,
+    as well as the depth at that site, and index those
+    observations into two separate numpy arrays.
+    """
     from cyvcf2 import VCF
     vcf = VCF(vcffile)
     smp2idx = dict(zip(vcf.samples, range(len(vcf.samples))))
@@ -119,12 +124,21 @@ def evaluate_variant_detect_power(region, trio, vcffile, return_dict):
     return_dict[str(region)] = (x, y)
 
 def evaluate_dp_thresh(region, trio, return_dict, cutoff=10):
+    """
+    Create a 1D array of depths across a given chromosom
+    in each sample from a trio. Evaluate the number of sites
+    at which depth is >= some cutoff.
+    """
     kd, md, dd = (dp_into_array(f+'.cov.gz', region=region) for f in trio) 
     shared_bases = ne.evaluate("(kd >= cutoff) & (md >= cutoff) & (dd >= cutoff)")
     shared_bases = shared_bases.sum()
     return_dict[str(region)] = str(shared_bases)
 
 def plot_variant_power(v_dict):
+    """
+    Plot the number of putative DNMs that
+    were identified at a specific depth.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -156,30 +170,31 @@ def main(args):
         k, m, d = trio.split(',')
         chroms = chrom_sizes.keys()
         if args.region: chroms = args.region
-        if args.trio and sorted(trio.split(',')) != sorted(args.trio.split(',')): continue
-        chroms = ['21', 'Y']
         # NOTE: this assumes gzipped files are sitting in the working directory
+        if args.trio and sorted(trio.split(',')) != sorted(args.trio.split(',')): continue
         iter_trios = [(k, m, d) for i in range(len(chroms))]
         # CRITICAL to initialize dictionary this way.
         manager = multiprocessing.Manager() 
         return_dict = manager.dict()
-
+        # Create iterables that pool.starmap needs for parallelization
         iter_dicts = [return_dict for i in range(len(chroms))]
         iter_vcf = [args.vcf for i in range(len(chroms))]
         iter_ = [i for i in zip(chroms, iter_trios, iter_dicts)]
         iter_v = [i for i in zip(chroms, iter_trios, iter_vcf, iter_dicts)]
-
+        # If we only want to output # bp above a depth cutoff in a trio...
         if args.shared: 
             import glob
+            # Make sure we haven't already created a trio-shared depth file,
+            # and confirm all samples in the trio have a corresponding mosdepth file
             already_written = (k + '.trio' in glob.glob('*.trio')
             if all([t + '.cov.gz' in glob.glob('*.gz') for t in (k, m, d)]) and not already_written:
                 outfile = open(k + '.trio', 'a')
                 outfile.write('\t'.join(['chrom','bases_at_depth_cutoff','\n']))
-            else: 
-                continue
+            else: continue
 
             with Pool(processes=args.processes) as pool:
                 pool.starmap(evaluate_dp_thresh, iter_)
+        # ...or if we just want to plot # DNM vs depth.
         else:
             with Pool(processes=args.processes) as pool:
                 pool.starmap(evaluate_variant_detect_power, iter_v)
@@ -189,8 +204,7 @@ def main(args):
             outfile.write('\t'.join(['all', str(sum([int(x) for x in d_return_dict.values()])), '\n']))
             for chrom in d_return_dict:
                 outfile.write('\t'.join([chrom, d_return_dict[chrom], '\n']))
-        else:
-            plot_variant_power(d_return_dict)
+        else: plot_variant_power(d_return_dict)
 
 if __name__ == '__main__':
     main(args)
