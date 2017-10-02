@@ -1,0 +1,5 @@
+./power.py
+./raw-power.py
+*.tbi
+*.csi
+*.gz

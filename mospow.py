@@ -13,9 +13,9 @@ import numpy as np
 
 p = argparse.ArgumentParser()
 p.add_argument('--ped', help='ped file')
-p.add_argument('--g', help='genome file with chr lengths')
+p.add_argument('--genome', help='genome file with chr lengths')
 p.add_argument('-trio', help='three samples to calculate coverage on, comma separated <kid,mom,dad>', type=str)
-p.add_argument('-d', '--directory', help='directory containing bgzipped and indexed coverage files', default='.')
+p.add_argument('-d', '--directory', help='directory containing bgzipped and indexed coverage files', default='./')
 p.add_argument('-r', '--region', help='specify region of interest <chr:start-end> OR <chr>', type=str)
 p.add_argument('-b', '--bed', help='instead of -r, pass in bed file of regions (i.e., exons, genes, TEs)')
 p.add_argument('-s', '--suffix', help="specify the suffix for files containing mosdepth output (default='per-base.bed.gz'", default='per-base.bed.gz')
@@ -81,7 +81,7 @@ def depth_heap(mdk, cutoff=10):
         except StopIteration:
             break
 
-def generate_trios(pedfile, f1=False):
+def generate_trios(pedfile, f1=True):
     """
     Given a PED file, specify whether you want
     to output trios w/r/t the F1 or F2 generation
@@ -118,8 +118,6 @@ def dp_into_array(covfile, region='1:1-100'):
             start, end, dp = (int(r[n]) for n in range(1,4))
             if dp == 0: continue
             dp_array[start:end] = dp
-            #if start % 1000000 == 0:
-            #    print ("chr %s, processed %.2f" % (c, 100*(start / length)))
             continue
         pos, dp = int(r[1]), int(r[2])
         if dp == 0: continue
@@ -127,7 +125,7 @@ def dp_into_array(covfile, region='1:1-100'):
         s = pos
     return dp_array
 
-def evaluate_depth_heap(region, trio, return_dict, cutoff):
+def evaluate_depth_heap(trio, region, return_dict, cutoff):
     """
     Method to evaluate proportion of bases in region
     that have depth above cutoff. Smaller memory footprint
@@ -135,9 +133,9 @@ def evaluate_depth_heap(region, trio, return_dict, cutoff):
     depth arrays per function call.
     """
     import tabix
-    kt, mt, dt = (tabix.open(covfile) for covfile in trio)
+    k_tx, m_tx, d_tx = (tabix.open(covfile) for covfile in trio)
     c, s, e = get_regions(region)
-    kr, mr, dr = (f.query(c, s, e) for f in (kt, mt, dt))
+    kr, mr, dr = (f.query(c, s, e) for f in (k_tx, m_tx, d_tx))
 
     shared_bases = 0
     for r in depth_heap((kr, mr, dr), cutoff=cutoff):
@@ -148,30 +146,30 @@ def evaluate_depth_heap(region, trio, return_dict, cutoff):
 def evaluate_dp_thresh(region, trio, return_dict, cutoff):
     ka, ma, da = (dp_into_array(c, region=region) for c in trio)
     shared_bases = numexpr("ka >= cutoff & ma >= cutoff & da >= cutoff")
-    shared_bases.sum()
+    shared_bases = shared_bases.sum()
     return_dict[str(region)] = str(shared_bases)
 
-chrom_sizes = get_chr_sizes(args.g)
+chrom_sizes = get_chr_sizes(args.genome)
 def main(args):
     chroms = chrom_sizes.keys()
     wd = args.directory
     for trio in generate_trios(args.ped):
         k, m, d = trio
-        if args.trio and sorted((k,m,d)) != sorted(args.trio.split(',')): 
+        if args.trio and sorted((k, m, d)) != sorted(args.trio.split(',')): 
             continue
         if args.region and args.bed: 
             raise NameError("can't specify region and bed")
         elif args.region: chroms = [args.region]
         elif args.bed: chroms = get_regions_from_bed(args.bed)
         else: pass
-        k,m,d = (wd + x + '.' + args.suffix for x in (k,m,d))
+        k, m, d = (wd + samp + '.' + args.suffix for samp in (k, m, d))
         # create iterable that pool.starmap needs for parallelization
         # across provided chromosomes/regions
         dict_proxy = Manager().dict()
-        iterable = [(c, (k,m,d), dict_proxy, args.cutoff) for c in chroms]
+        iterable = [((k, m, d), c, dict_proxy, args.cutoff) for c in chroms]
         # confirm that all samples in the trio have a corresponding depth file.
-        if all([x in glob.glob(wd + '*.gz') for x in (k,m,d)]):
-            outfile = open(k + '.trio', 'a')
+        if all([x in glob.glob(wd + '*.gz') for x in (k, m, d)]):
+            outfile = open(k + '.trio', 'w')
             outfile.write('\t'.join(['chrom','bases_at_depth_cutoff','\n']))
         else: continue
         with Pool(processes=args.processes) as pool:
