@@ -4,6 +4,8 @@
 
 specifically, `mospow` calculates the fraction of the genome covered by at least X reads in a single individual, across a trio of samples, or across a tumor-normal pair
 
+currently, `mospow` only works on trios. a PED file is a required argument, from which trios are generated and compared to an optional `-trio` argument.
+
 ```
 python mospow.py \
     --ped       PED file [REQUIRED]
