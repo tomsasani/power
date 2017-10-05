@@ -1,5 +1,7 @@
 import hts
 import strutils
+import sequtils
+import kexpr
 import os
 import docopt
 import parsecsv
@@ -13,12 +15,6 @@ type
 
   Gen = iterator (): interval
 
-type
-  bed_interval = tuple
-    chrom: string
-    start: int
-    stop: int
-
 # https://forum.nim-lang.org/t/435
 proc fastSubStr(dest: var string; src: string, a, b: int) {.inline.} =
   # once the stdlib uses TR macros, these things should not be necessary
@@ -26,28 +22,16 @@ proc fastSubStr(dest: var string; src: string, a, b: int) {.inline.} =
   setLen(dest, b-a)
   copyMem(addr dest[0], src+!a, b-a)
 
-iterator region_from_bed(bed:string): bed_interval =
-  var p: CsvParser
-  open(p, bed, separator='\t')
-  while readRow(p):
-    var chrom = p.row[0]
-    var start = parseInt(p.row[1])
-    var stop = parseInt(p.row[2])
-
-    yield (chrom, start, stop)
-
-
-proc gen_from_bed(per_base_bed:string, chrom:string, rstart:int, rstop:int, depth_col:int=3): Gen =
+proc gen_from_bgzi(b:BGZI, iv:interval, depth_col:int=3): Gen =
   result = iterator(): interval {.inline.} =
     var col = depth_col
-    var b = ropen_bgzi(per_base_bed)
     var pos0, pos1: int
     var tmp = new_string_of_cap(20)
-
+    var chrom = iv.chrom
     var start, stop, depth: int
     # a lot of extra stuff in here to minimize garbage creation and
     # copying
-    for line in b.query(chrom, rstart, rstop):
+    for line in b.query(iv.chrom, iv.start, iv.stop):
       pos0 = line.find('\t')
       pos1 = line.find('\t', pos0+1)
       fastSubstr(tmp, line, pos0+1, pos1)
@@ -64,11 +48,13 @@ proc gen_from_bed(per_base_bed:string, chrom:string, rstart:int, rstop:int, dept
       depth = parseInt(tmp)
       yield (chrom, start, stop, depth)
 
-iterator meets(depth_cutoff:int, depths: seq[Gen]): interval =
+iterator meets(depth_cutoff:int, expr:Expr, depths: seq[Gen], names: seq[string]): interval =
   var heap = new_seq[interval](depths.len)
   var maxi = new_seq[int](depths.len)
   for i in 0..<depths.len:
     heap[i] = depths[i]()
+    if expr != nil:
+      discard ke_set_int(expr.ke, names[i], cint(heap[i].depth))
 
   var done = false
   var chrom: string
@@ -92,8 +78,10 @@ iterator meets(depth_cutoff:int, depths: seq[Gen]): interval =
         maxi.add(i)
       if iv.depth < depth_cutoff:
         allok = false
-
-    if allok:
+    if expr != nil:
+      if expr.get_bool():
+        yield (chrom, istart, istop, 1)
+    elif allok:
       yield (chrom, istart, istop, 1)
     # any site that ended at the max end
     # we replace with the next value.
@@ -101,43 +89,110 @@ iterator meets(depth_cutoff:int, depths: seq[Gen]): interval =
       heap[i] = depths[i]()
       if finished(depths[i]):
         done = true
+      if expr != nil:
+        discard ke_set_int(expr.ke, names[i], cint(heap[i].depth))
 
-proc main(cutoff:int, chrom:string="21", start:int=0, stop:int=48129895, beds : seq[string]) =
-  var gens = new_seq[Gen](len(beds))
-  for i, b in beds:
-    gens[i] = gen_from_bed(b, chrom, start, stop)
+proc bed_line_to_region(line: string): interval =
+  var
+    cse = sequtils.to_seq(line.strip().split("\t"))
+
+  if len(cse) < 3:
+    stderr.write_line("[mosdepth] skipping bad bed line:", line.strip())
+    return ("", 0, 0, 0)
+  var
+    s = parse_int(cse[1])
+    e = parse_int(cse[2])
+  return (cse[0], s, e, 0)
+
+proc bed_to_table(bed: string): OrderedTableRef[string, seq[interval]] =
+  ## this is used to read in a bed file of, e.g. capture regions into a table.
+  var bed_regions = newOrderedTable[string, seq[interval]]()
+  var hf = hts.hts_open(cstring(bed), "r")
+  var kstr = hts.kstring_t(l:0, m:0, s:nil)
+  while hts_getline(hf, cint(10), addr kstr) > 0:
+    var l = $kstr.s
+    if l.startswith("track "):
+      continue
+    if l.startswith("#"):
+      continue
+    var v = bed_line_to_region(l)
+    if v.stop == 0: continue
+    discard bed_regions.hasKeyOrPut(v.chrom, new_seq[interval]())
+    bed_regions[v.chrom].add(v)
+
+  hts.free(kstr.s)
+  return bed_regions
+
+proc region_main(cutoff:int, expr:string, bed_regions:string, depths: seq[BGZI], names: seq[string]) =
+  var e : Expr
+  if expr != "":
+    e = expression(expr)
+    if e.error() != 0:
+      stderr.write_line("[mospow] error parsing expression:", expr)
+      quit(e.error())
+
+  var regions = bed_to_table(bed_regions)
+  var gens = new_seq[Gen](len(depths))
   var sum: int
-  for value in meets(cutoff, gens):
-    sum += value.stop - value.start
-  echo sum
+  for chrom, regs in regions:
+    for reg in regs:
+      for i, d in depths:
+        gens[i] = d.gen_from_bgzi(reg)
+      for iv in meets(cutoff, e, gens, names):
+        sum += iv.stop - iv.start
+      echo sum
+
+proc get_names(paths: seq[string], expr:string): seq[string] =
+  if expr == "": return
+  result = new_seq[string](len(paths))
+  for i, p in paths:
+    var tmp = p.split("/")
+    var name = tmp[tmp.high]
+    for suffix in @[".gz", ".bed", ".per-base"]:
+      if name.ends_with(suffix):
+        name = name[0..<(name.len - len(suffix))]
+    if name.isdigit():
+      name = "s" & name
+    stderr.write_line("[mospow] using name:", name, " for:", p)
+    result[i] = name
+
+proc main(cutoff:int, expr:string, bed_regions:string, chrom: string, depth_beds: seq[string]) =
+  var bgzis = new_seq[BGZI](len(depth_beds))
+  for i, b in depth_beds:
+    bgzis[i] = ropen_bgzi(b)
+
+  if bed_regions != "":
+    region_main(cutoff, expr, bed_regions, bgzis, get_names(depth_beds, expr))
+    quit(0)
+
+  # TODO:
 
 when isMainModule:
   let doc = """
   mospow
 
   Usage:
-    mospow [options] <BED>...
+    mospow [options] <DEPTH_BED>...
 
-    -d --cutoff <cutoff>	            depth required at every base in each input BED [default: 10]
-    -c --chrom <chrom>	              chromosome to restrict power calculation
-    -b --bed_regions <bed_regions>    BED file of regions to restrict power calculation (TE, exons, etc.)
-    -r --region <region>              instead of -b, single region <chr:start-end>
+    -d --cutoff <cutoff>              depth required at every base in each input BED [default: 10]
+    -e --expr <expr>                  expression on which to filter (use instead of cutoff)
+    -r --region <region>              region to restrict power calculation (use instead of bed_regions)
+    -b --bed-regions <bed_regions>    BED file of regions to restrict power calculation (TE, exons, etc.)
 
   """
-  let args = docopt(doc, version = "mospow v0.0.1")
-  var beds = new_seq[string]()
-  var chrom: string
-  for s in @(args["<BED>"]):
-    beds.add(s)
+  let args = docopt(doc, version = "mospow v0.0.2")
+  var bed_regions: string = ""
+  var expr = ""
+  var region = ""
   # if a chrom other than 21 is specified, mospow won't know the length
-  if $args["--chrom"] != "nil":
-    chrom = $args["--chrom"] 
-  # this isn't working currently, always goes to 10
+  if $args["--region"] != "nil":
+    region = $args["--region"]
+  if $args["--expr"] != "nil":
+    expr = $args["--expr"]
+
   var cutoff = parseInt($args["--cutoff"])
-  if $args["--bed_regions"] == "nil":
-    main(cutoff, beds=beds)
-  # added this to loop over input BED regions (if applicable)
-  else:
-    let bed_regions = $args["--bed_regions"]
-    for x in region_from_bed(bed_regions):
-      main(cutoff, beds=beds, chrom=x[0], start=x[1], stop=x[2])
+
+  if $args["--bed-regions"] != "nil":
+    bed_regions = $args["--bed-regions"]
+
+  main(cutoff, expr, bed_regions, region, @(args["<DEPTH_BED>"]))
