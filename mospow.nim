@@ -1,7 +1,8 @@
 import hts
 import strutils
-import kexpr
 import os
+import docopt
+import parsecsv
 
 type
   interval = tuple
@@ -12,12 +13,28 @@ type
 
   Gen = iterator (): interval
 
+type
+  bed_interval = tuple
+    chrom: string
+    start: int
+    stop: int
+
 # https://forum.nim-lang.org/t/435
 proc fastSubStr(dest: var string; src: string, a, b: int) {.inline.} =
   # once the stdlib uses TR macros, these things should not be necessary
   template `+!`(src, a): expr = cast[pointer](cast[int](cstring(src)) + a)
   setLen(dest, b-a)
   copyMem(addr dest[0], src+!a, b-a)
+
+iterator region_from_bed(bed:string): bed_interval =
+  var p: CsvParser
+  open(p, bed, separator='\t')
+  while readRow(p):
+    var chrom = p.row[0]
+    var start = parseInt(p.row[1])
+    var stop = parseInt(p.row[2])
+
+    yield (chrom, start, stop)
 
 
 proc gen_from_bed(per_base_bed:string, chrom:string, rstart:int, rstop:int, depth_col:int=3): Gen =
@@ -85,7 +102,7 @@ iterator meets(depth_cutoff:int, depths: seq[Gen]): interval =
       if finished(depths[i]):
         done = true
 
-proc main(cutoff:int, chrom:string="1", start:int=0, stop:int=249250621, beds : seq[string]) =
+proc main(cutoff:int, chrom:string="21", start:int=0, stop:int=48129895, beds : seq[string]) =
   var gens = new_seq[Gen](len(beds))
   for i, b in beds:
     gens[i] = gen_from_bed(b, chrom, start, stop)
@@ -95,7 +112,36 @@ proc main(cutoff:int, chrom:string="1", start:int=0, stop:int=249250621, beds : 
   echo sum
 
 when isMainModule:
+  let doc = """
+  mospow
+
+  Usage:
+    mospow [options] <BED>...
+
+  Common options:
+
+    -d --depth_cutoff <depth_cutoff>	depth required at every base in each input BED
+    -c --chrom <chrom>	              chromosome to restrict power calculation
+    -b --bed_regions <bed_regions>    BED file of regions to restrict power calculation (TE, exons, etc.)
+    -r --region <region>              instead of -b, single region <chr:start-end>
+
+  """
+
+  var cutoff = 10
+  let args = docopt(doc, version = "mospow v0.0.1")
   var beds = new_seq[string]()
-  for s in commandLineParams():
+  for s in @(args["<BED>"]):
     beds.add(s)
-  main(10, beds=beds)
+  # if a chrom other than 21 is specified, mospow won't know the length
+  if $args["--chrom"] != "nil":
+    let chrom = $args["--chrom"] 
+  # this isn't working currently, always goes to 10
+  if $args["--depth_cutoff"] != "nil":
+    var cutoff = parseInt($args["--depth_cutoff"])
+  if $args["--bed_regions"] == "nil":
+    main(cutoff, beds=beds)
+  # added this to loop over input BED regions (if applicable)
+  else:
+    let bed_regions = $args["--bed_regions"]
+    for x in region_from_bed(bed_regions):
+      main(cutoff, beds=beds, chrom=x[0], start=x[1], stop=x[2])
