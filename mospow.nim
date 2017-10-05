@@ -118,26 +118,22 @@ when isMainModule:
   Usage:
     mospow [options] <BED>...
 
-  Common options:
-
-    -d --depth_cutoff <depth_cutoff>	depth required at every base in each input BED
+    -d --cutoff <cutoff>	            depth required at every base in each input BED [default: 10]
     -c --chrom <chrom>	              chromosome to restrict power calculation
     -b --bed_regions <bed_regions>    BED file of regions to restrict power calculation (TE, exons, etc.)
     -r --region <region>              instead of -b, single region <chr:start-end>
 
   """
-
-  var cutoff = 10
   let args = docopt(doc, version = "mospow v0.0.1")
   var beds = new_seq[string]()
+  var chrom: string
   for s in @(args["<BED>"]):
     beds.add(s)
   # if a chrom other than 21 is specified, mospow won't know the length
   if $args["--chrom"] != "nil":
-    let chrom = $args["--chrom"] 
+    chrom = $args["--chrom"] 
   # this isn't working currently, always goes to 10
-  if $args["--depth_cutoff"] != "nil":
-    var cutoff = parseInt($args["--depth_cutoff"])
+  var cutoff = parseInt($args["--cutoff"])
   if $args["--bed_regions"] == "nil":
     main(cutoff, beds=beds)
   # added this to loop over input BED regions (if applicable)
