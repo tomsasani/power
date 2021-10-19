@@ -18,7 +18,7 @@ type
 # https://forum.nim-lang.org/t/435
 proc fastSubStr(dest: var string; src: string, a, b: int) {.inline.} =
   # once the stdlib uses TR macros, these things should not be necessary
-  template `+!`(src, a): expr = cast[pointer](cast[int](cstring(src)) + a)
+  template `+!`(src, a): untyped = cast[pointer](cast[int](cstring(src)) + a)
   setLen(dest, b-a)
   copyMem(addr dest[0], src+!a, b-a)
 
@@ -79,7 +79,7 @@ iterator meets(depth_cutoff:int, expr:Expr, depths: seq[Gen], names: seq[string]
       if iv.depth < depth_cutoff:
         allok = false
     if expr != nil:
-      if expr.get_bool():
+      if bool(expr):
         yield (chrom, istart, istop, 1)
     elif allok:
       yield (chrom, istart, istop, 1)
@@ -141,6 +141,12 @@ proc region_main(cutoff:int, expr:string, bed_regions:string, depths: seq[BGZI],
       for iv in meets(cutoff, e, gens, names):
         sum += iv.stop - iv.start
       echo sum
+
+proc isdigit(s:string): bool =
+  for c in s:
+    if not c.isdigit: return false
+  return true
+
 
 proc get_names(paths: seq[string], expr:string): seq[string] =
   if expr == "": return
